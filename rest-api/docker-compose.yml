@@ -1,0 +1,14 @@
+services:
+  temperature-sensor:
+    build: .
+    container_name: temperature-sensor
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    devices:
+      - /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A906EWH5-if00-port0:/dev/ttyUSB0
+    group_add:
+      - "${SERIAL_GID:-46}"   # group of the serial device on the host (plugdev/dialout)
+    environment:
+      - TZ=${TZ:-UTC}
+      - SERIAL_PORT=/dev/ttyUSB0

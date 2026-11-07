@@ -1,0 +1,5 @@
+[tool.mutmut]
+source_paths = ["server.py"]
+also_copy = ["index.html", "pytest.ini"]
+pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider"]
+pytest_add_cli_args_test_selection = ["tests/"]

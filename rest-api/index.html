@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temperature</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#6a737d; --grid:#e3e6ea; --line:#d9480f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171a; --card:#1d2125; --fg:#e8eaed; --muted:#98a1ab; --grid:#2e343a; --line:#ff8a4c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+         font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:900px; margin:0 auto; }
+  .card { background:var(--card); border-radius:12px; padding:16px; }
+  .now { font-size:clamp(2.5rem,12vw,4rem); font-weight:600; line-height:1.1; }
+  .sub { color:var(--muted); font-size:.9rem; }
+  .stats { display:flex; gap:24px; margin:12px 0 4px; flex-wrap:wrap; }
+  .stats b { display:block; font-size:1.2rem; }
+  svg { width:100%; height:auto; display:block; margin-top:12px; touch-action:pan-y; }
+  svg text { fill:var(--muted); font-size:11px; }
+  .grid { stroke:var(--grid); stroke-width:1; }
+  .line { fill:none; stroke:var(--line); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+  .cursor { stroke:var(--muted); stroke-width:1; stroke-dasharray:3 3; }
+  .dot { fill:var(--line); }
+  button { margin-top:12px; padding:10px 16px; font:inherit; color:var(--fg); background:var(--card);
+           border:1px solid var(--grid); border-radius:8px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #tip { min-height:1.4em; margin-top:4px; }
+  #err { color:#d1242f; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <div class="sub">Current</div>
+    <div class="now" id="now">–</div>
+    <div class="sub" id="when">&nbsp;</div>
+    <button id="measure" type="button">Measure now</button>
+    <div class="stats">
+      <div><span class="sub">Min (24 h)</span><b id="min">–</b></div>
+      <div><span class="sub">Max (24 h)</span><b id="max">–</b></div>
+    </div>
+    <svg id="chart" viewBox="0 0 600 300" role="img" aria-label="Temperature history of the last 24 hours"></svg>
+    <div class="sub" id="tip">&nbsp;</div>
+    <div id="err"></div>
+  </div>
+</main>
+<script>
+const NS = "http://www.w3.org/2000/svg";
+const W = 600, H = 300, L = 44, R = 12, T = 12, B = 28;
+const svg = document.getElementById("chart");
+let pts = [];
+
+const el = (n, a = {}, t) => {
+  const e = document.createElementNS(NS, n);
+  for (const k in a) e.setAttribute(k, a[k]);
+  if (t !== undefined) e.textContent = t;
+  return e;
+};
+const fmtT = d => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const fmtV = v => v.toFixed(1) + " °C";
+
+function draw() {
+  svg.replaceChildren();
+  if (!pts.length) return;
+  const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 60000);
+  let lo = Math.min(...pts.map(p => p.v)), hi = Math.max(...pts.map(p => p.v));
+  lo = Math.floor(lo - 0.5); hi = Math.ceil(hi + 0.5);
+  const x = t => L + (t - t0) / (t1 - t0) * (W - L - R);
+  const y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+  const step = (hi - lo) > 10 ? 5 : (hi - lo) > 4 ? 2 : 1;
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    svg.append(el("line", { class: "grid", x1: L, x2: W - R, y1: y(v), y2: y(v) }));
+    svg.append(el("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, v + "°"));
+  }
+  for (let i = 0; i <= 4; i++) {
+    const t = t0 + (t1 - t0) * i / 4;
+    svg.append(el("text", { x: x(t), y: H - 8, "text-anchor": i === 0 ? "start" : i === 4 ? "end" : "middle" }, fmtT(new Date(t))));
+  }
+  // Break the line when more than 2 minutes are missing (Arduino was disconnected)
+  let d = "";
+  pts.forEach((p, i) => {
+    const gap = i === 0 || p.t - pts[i - 1].t > 150000;
+    d += (gap ? "M" : "L") + x(p.t).toFixed(1) + " " + y(p.v).toFixed(1);
+  });
+  svg.append(el("path", { class: "line", d }));
+  svg._x = x; svg._y = y; svg._t0 = t0; svg._t1 = t1;
+}
+
+function show(clientX) {
+  if (!pts.length || !svg._x) return;
+  const r = svg.getBoundingClientRect();
+  const vx = (clientX - r.left) / r.width * W;
+  const t = svg._t0 + (vx - L) / (W - L - R) * (svg._t1 - svg._t0);
+  const p = pts.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
+  svg.querySelectorAll(".cursor,.dot").forEach(e => e.remove());
+  svg.append(el("line", { class: "cursor", x1: svg._x(p.t), x2: svg._x(p.t), y1: T, y2: H - B }));
+  svg.append(el("circle", { class: "dot", cx: svg._x(p.t), cy: svg._y(p.v), r: 4 }));
+  document.getElementById("tip").textContent = fmtT(new Date(p.t)) + " – " + fmtV(p.v);
+}
+svg.addEventListener("pointermove", e => show(e.clientX));
+svg.addEventListener("pointerdown", e => show(e.clientX));
+
+async function load() {
+  const err = document.getElementById("err");
+  try {
+    const [h, c] = await Promise.all([fetch("history"), fetch("temperature")]);
+    pts = (await h.json()).map(p => ({ t: new Date(p.timestamp).getTime(), v: p.temperature_c })).sort((a, b) => a.t - b.t);
+    if (c.ok) {
+      const cur = await c.json();
+      document.getElementById("now").textContent = fmtV(cur.temperature_c);
+      document.getElementById("when").textContent = "As of " + fmtT(new Date(cur.timestamp));
+    } else {
+      document.getElementById("now").textContent = "–";
+      document.getElementById("when").textContent = "No current reading (Arduino disconnected?)";
+    }
+    if (pts.length) {
+      document.getElementById("min").textContent = fmtV(Math.min(...pts.map(p => p.v)));
+      document.getElementById("max").textContent = fmtV(Math.max(...pts.map(p => p.v)));
+    }
+    err.textContent = pts.length ? "" : "No history yet - one value is stored per minute.";
+    draw();
+  } catch (e) {
+    err.textContent = "Could not load data.";
+  }
+}
+document.getElementById("measure").addEventListener("click", async e => {
+  const b = e.currentTarget, err = document.getElementById("err");
+  b.disabled = true;
+  try {
+    const r = await fetch("measure", { method: "POST" });
+    if (!r.ok) err.textContent = "Measurement not possible (Arduino disconnected?)";
+    else await load();
+  } catch (x) { err.textContent = "Measurement failed."; }
+  b.disabled = false;
+});
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

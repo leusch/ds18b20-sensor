@@ -1,0 +1,7 @@
+*.swp
+*.swo
+__pycache__/
+.coverage
+.pytest_cache/
+.venv/
+mutants/
