@@ -5,25 +5,31 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Temperature</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#6a737d; --grid:#e3e6ea; --line:#d9480f; }
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#6a737d; --grid:#e3e6ea;
+    --c0:#d9480f; --c1:#1971c2; --c2:#2f9e44; --c3:#9c36b5; --c4:#c2255c; --c5:#5f6b7a; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#14171a; --card:#1d2125; --fg:#e8eaed; --muted:#98a1ab; --grid:#2e343a; --line:#ff8a4c; }
+    :root { --bg:#14171a; --card:#1d2125; --fg:#e8eaed; --muted:#98a1ab; --grid:#2e343a;
+      --c0:#ff8a4c; --c1:#74b9ff; --c2:#69db7c; --c3:#da77f2; --c4:#f783ac; --c5:#adb5bd; }
   }
   * { box-sizing: border-box; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
          font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
   main { max-width:900px; margin:0 auto; }
   .card { background:var(--card); border-radius:12px; padding:16px; }
-  .now { font-size:clamp(2.5rem,12vw,4rem); font-weight:600; line-height:1.1; }
   .sub { color:var(--muted); font-size:.9rem; }
-  .stats { display:flex; gap:24px; margin:12px 0 4px; flex-wrap:wrap; }
-  .stats b { display:block; font-size:1.2rem; }
+  .sensor { display:grid; grid-template-columns:auto 1fr auto; gap:2px 12px; align-items:baseline;
+            padding:10px 0; border-top:1px solid var(--grid); }
+  .sensor:first-of-type { border-top:0; }
+  .swatch { width:12px; height:12px; border-radius:50%; align-self:center; }
+  .sensor .name { font-weight:600; }
+  .sensor .now { font-size:1.6rem; font-weight:600; text-align:right; }
+  .sensor .detail { grid-column:2 / 4; }
+  .offline .now { color:var(--muted); }
   svg { width:100%; height:auto; display:block; margin-top:12px; touch-action:pan-y; }
   svg text { fill:var(--muted); font-size:11px; }
   .grid { stroke:var(--grid); stroke-width:1; }
-  .line { fill:none; stroke:var(--line); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+  .line { fill:none; stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
   .cursor { stroke:var(--muted); stroke-width:1; stroke-dasharray:3 3; }
-  .dot { fill:var(--line); }
   button { margin-top:12px; padding:10px 16px; font:inherit; color:var(--fg); background:var(--card);
            border:1px solid var(--grid); border-radius:8px; cursor:pointer; }
   button:disabled { opacity:.5; cursor:default; }
@@ -34,15 +40,9 @@
 <body>
 <main>
   <div class="card">
-    <div class="sub">Current</div>
-    <div class="now" id="now">–</div>
-    <div class="sub" id="when">&nbsp;</div>
+    <div id="sensors"><div class="sub">Loading …</div></div>
     <button id="measure" type="button">Measure now</button>
-    <div class="stats">
-      <div><span class="sub">Min (24 h)</span><b id="min">–</b></div>
-      <div><span class="sub">Max (24 h)</span><b id="max">–</b></div>
-    </div>
-    <svg id="chart" viewBox="0 0 600 300" role="img" aria-label="Temperature history of the last 24 hours"></svg>
+    <svg id="chart" viewBox="0 0 600 300" role="img" aria-label="Temperature history of the last 24 hours, one line per sensor"></svg>
     <div class="sub" id="tip">&nbsp;</div>
     <div id="err"></div>
   </div>
@@ -51,7 +51,7 @@
 const NS = "http://www.w3.org/2000/svg";
 const W = 600, H = 300, L = 44, R = 12, T = 12, B = 28;
 const svg = document.getElementById("chart");
-let pts = [];
+let series = [];  // [{ id, name, color, online, value, ts, pts: [{t, v}] }]
 
 const el = (n, a = {}, t) => {
   const e = document.createElementNS(NS, n);
@@ -64,9 +64,10 @@ const fmtV = v => v.toFixed(1) + " °C";
 
 function draw() {
   svg.replaceChildren();
-  if (!pts.length) return;
-  const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 60000);
-  let lo = Math.min(...pts.map(p => p.v)), hi = Math.max(...pts.map(p => p.v));
+  const all = series.flatMap(s => s.pts);
+  if (!all.length) return;
+  const t0 = Math.min(...all.map(p => p.t)), t1 = Math.max(Math.max(...all.map(p => p.t)), t0 + 60000);
+  let lo = Math.min(...all.map(p => p.v)), hi = Math.max(...all.map(p => p.v));
   lo = Math.floor(lo - 0.5); hi = Math.ceil(hi + 0.5);
   const x = t => L + (t - t0) / (t1 - t0) * (W - L - R);
   const y = v => T + (hi - v) / (hi - lo) * (H - T - B);
@@ -79,48 +80,82 @@ function draw() {
     const t = t0 + (t1 - t0) * i / 4;
     svg.append(el("text", { x: x(t), y: H - 8, "text-anchor": i === 0 ? "start" : i === 4 ? "end" : "middle" }, fmtT(new Date(t))));
   }
-  // Break the line when more than 2 minutes are missing (Arduino was disconnected)
-  let d = "";
-  pts.forEach((p, i) => {
-    const gap = i === 0 || p.t - pts[i - 1].t > 150000;
-    d += (gap ? "M" : "L") + x(p.t).toFixed(1) + " " + y(p.v).toFixed(1);
-  });
-  svg.append(el("path", { class: "line", d }));
+  for (const s of series) {
+    // Break the line when more than 2 minutes are missing (sensor or Arduino was disconnected)
+    let d = "";
+    s.pts.forEach((p, i) => {
+      const gap = i === 0 || p.t - s.pts[i - 1].t > 150000;
+      d += (gap ? "M" : "L") + x(p.t).toFixed(1) + " " + y(p.v).toFixed(1);
+    });
+    svg.append(el("path", { class: "line", style: "stroke:" + s.color, d }));
+  }
   svg._x = x; svg._y = y; svg._t0 = t0; svg._t1 = t1;
 }
 
+const nearest = (pts, t) => pts.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
+
 function show(clientX) {
-  if (!pts.length || !svg._x) return;
+  if (!svg._x || !series.some(s => s.pts.length)) return;
   const r = svg.getBoundingClientRect();
   const vx = (clientX - r.left) / r.width * W;
   const t = svg._t0 + (vx - L) / (W - L - R) * (svg._t1 - svg._t0);
-  const p = pts.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
   svg.querySelectorAll(".cursor,.dot").forEach(e => e.remove());
-  svg.append(el("line", { class: "cursor", x1: svg._x(p.t), x2: svg._x(p.t), y1: T, y2: H - B }));
-  svg.append(el("circle", { class: "dot", cx: svg._x(p.t), cy: svg._y(p.v), r: 4 }));
-  document.getElementById("tip").textContent = fmtT(new Date(p.t)) + " – " + fmtV(p.v);
+  const hits = series.filter(s => s.pts.length).map(s => ({ s, p: nearest(s.pts, t) }));
+  const best = nearest(hits.map(h => h.p), t);
+  svg.append(el("line", { class: "cursor", x1: svg._x(best.t), x2: svg._x(best.t), y1: T, y2: H - B }));
+  for (const { s, p } of hits) {
+    svg.append(el("circle", { class: "dot", style: "fill:" + s.color, cx: svg._x(p.t), cy: svg._y(p.v), r: 4 }));
+  }
+  document.getElementById("tip").textContent = fmtT(new Date(best.t)) + " – " +
+    hits.map(({ s, p }) => label(s) + " " + fmtV(p.v)).join(" · ");
 }
 svg.addEventListener("pointermove", e => show(e.clientX));
 svg.addEventListener("pointerdown", e => show(e.clientX));
 
+// The full address is 16 hex digits; the last 4 are enough to tell sensors apart on screen.
+const shortId = id => "…" + id.slice(-4);
+const label = s => s.name || "Sensor " + shortId(s.id);
+
+function renderSensors() {
+  const box = document.getElementById("sensors");
+  box.replaceChildren();
+  if (!series.length) {
+    const d = document.createElement("div");
+    d.className = "sub";
+    d.textContent = "No sensor detected yet (Arduino disconnected?)";
+    box.append(d);
+    return;
+  }
+  for (const s of series) {
+    const row = document.createElement("div");
+    row.className = "sensor" + (s.online ? "" : " offline");
+    const add = (cls, text, style) => {
+      const d = document.createElement("div");
+      d.className = cls; d.textContent = text;
+      if (style) d.setAttribute("style", style);
+      row.append(d);
+    };
+    add("swatch", "", "background:" + s.color);
+    add("name", label(s));
+    add("now", s.online ? fmtV(s.value) : "–");
+    const vs = s.pts.map(p => p.v);
+    const range = vs.length ? "Min " + fmtV(Math.min(...vs)) + " · Max " + fmtV(Math.max(...vs)) + " (24 h)" : "No history yet";
+    add("sub detail", (s.online ? "As of " + fmtT(new Date(s.ts)) : "Offline – last seen " + fmtT(new Date(s.ts))) + " · " + range);
+    box.append(row);
+  }
+}
+
 async function load() {
   const err = document.getElementById("err");
   try {
-    const [h, c] = await Promise.all([fetch("history"), fetch("temperature")]);
-    pts = (await h.json()).map(p => ({ t: new Date(p.timestamp).getTime(), v: p.temperature_c })).sort((a, b) => a.t - b.t);
-    if (c.ok) {
-      const cur = await c.json();
-      document.getElementById("now").textContent = fmtV(cur.temperature_c);
-      document.getElementById("when").textContent = "As of " + fmtT(new Date(cur.timestamp));
-    } else {
-      document.getElementById("now").textContent = "–";
-      document.getElementById("when").textContent = "No current reading (Arduino disconnected?)";
-    }
-    if (pts.length) {
-      document.getElementById("min").textContent = fmtV(Math.min(...pts.map(p => p.v)));
-      document.getElementById("max").textContent = fmtV(Math.max(...pts.map(p => p.v)));
-    }
-    err.textContent = pts.length ? "" : "No history yet - one value is stored per minute.";
+    const list = await (await fetch("sensors")).json();
+    const histories = await Promise.all(list.map(async s => (await fetch("sensors/" + s.id + "/history")).json()));
+    series = list.map((s, i) => ({
+      id: s.id, name: s.name, color: "var(--c" + (i % 6) + ")", online: s.online, value: s.temperature_c, ts: s.timestamp,
+      pts: histories[i].map(p => ({ t: new Date(p.timestamp).getTime(), v: p.temperature_c })).sort((a, b) => a.t - b.t),
+    }));
+    renderSensors();
+    err.textContent = series.some(s => s.pts.length) ? "" : "No history yet - one value per sensor is stored per minute.";
     draw();
   } catch (e) {
     err.textContent = "Could not load data.";
@@ -130,8 +165,9 @@ document.getElementById("measure").addEventListener("click", async e => {
   const b = e.currentTarget, err = document.getElementById("err");
   b.disabled = true;
   try {
-    const r = await fetch("measure", { method: "POST" });
-    if (!r.ok) err.textContent = "Measurement not possible (Arduino disconnected?)";
+    const online = series.filter(s => s.online);
+    const rs = await Promise.all(online.map(s => fetch("sensors/" + s.id + "/measure", { method: "POST" })));
+    if (!online.length || rs.some(r => !r.ok)) err.textContent = "Measurement not possible (sensor or Arduino disconnected?)";
     else await load();
   } catch (x) { err.textContent = "Measurement failed."; }
   b.disabled = false;

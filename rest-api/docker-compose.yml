@@ -9,6 +9,9 @@ services:
       - /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A906EWH5-if00-port0:/dev/ttyUSB0
     group_add:
       - "${SERIAL_GID:-46}"   # group of the serial device on the host (plugdev/dialout)
+    volumes:
+      - ./config:/config:ro   # sensor_names.json: edit it, no rebuild needed
     environment:
+      - SENSOR_NAMES_FILE=/config/sensor_names.json
       - TZ=${TZ:-UTC}
       - SERIAL_PORT=/dev/ttyUSB0

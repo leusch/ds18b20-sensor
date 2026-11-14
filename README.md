@@ -1,12 +1,13 @@
 # Temperature Sensor
 
-A DS18B20 temperature sensor on an Arduino Nano, exposed over HTTP.
+One or more DS18B20 temperature sensors on an Arduino Nano, exposed over HTTP.
 
 ```
 DS18B20 --> Arduino Nano --USB serial--> Docker container (FastAPI) --> JSON API + chart page
 ```
 
-- The Arduino prints one reading per second on the serial port.
+- All DS18B20 sensors share one 1-Wire data line (D2). The Arduino rescans the bus every second, so sensors you plug in or remove while it runs are picked up. There is no fixed sensor limit; in practice cable length and supply power are the limit.
+- The Arduino prints one reading per sensor and second on the serial port. Each sensor is identified by its unique 64-bit address.
 - The API service reads it, stores one value per minute for the last 24 hours **in memory only**, and serves it over HTTP.
 - Nothing is written to disk. Restarting the container clears the history.
 
@@ -45,11 +46,12 @@ Nanos with the old bootloader need `cpu=atmega328old`. If the upload fails with 
 Check the output (9600 baud):
 
 ```
-DS18B20 sensors found: 1
-Temperature: 21.50 C
+DS18B20 sensors found: 2
+Sensor 1 [28FF641E8D3C0A12]: 21.50 C
+Sensor 2 [28AA000000000001]: 18.00 C
 ```
 
-`sensors found: 0` or `No sensor detected` means a wiring or pull-up problem.
+`sensors found: 0` or `No sensor detected` means a wiring or pull-up problem. `read error` for a single sensor means that sensor has a bad connection; the others keep working. Sensor numbers can change when the bus order changes, the address in brackets does not.
 
 ### 2. Run the API with Docker
 
@@ -74,6 +76,7 @@ Configuration:
 | `SERIAL_GID` | shell / `.env` | `46` | Group ID of the serial device on the host (`stat -L -c %g <device>`). The container runs as a non-root user and needs this group. |
 | `TZ` | shell / `.env` | `UTC` | Time zone of the timestamps in API responses. |
 | `SERIAL_PORT` | `environment:` | `/dev/ttyUSB0` | Serial port inside the container. |
+| `SENSOR_NAMES_FILE` | `environment:` | `/config/sensor_names.json` | Path of the names file inside the container. |
 | `SERIAL_BAUD` | `environment:` | `9600` | Must match the firmware. |
 | `MAX_AGE_S` | `environment:` | `15` | A reading older than this counts as stale (Arduino disconnected). |
 
@@ -83,14 +86,35 @@ The service listens on port **8000**. Change the left side of `ports:` if it is 
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Chart page (HTML) with current value, min/max and a 24 h chart. Works on mobile and desktop. |
-| `GET` | `/temperature` | Latest reading. |
-| `GET` | `/history` | Stored values of the last 24 h, oldest first. |
-| `POST` | `/measure` | Store the current reading in the history immediately, in addition to the per-minute sample. |
+| `GET` | `/` | Chart page (HTML) with current value and min/max per sensor and a 24 h chart with one line per sensor. Works on mobile and desktop. |
+| `GET` | `/sensors` | All sensors seen since the service started, with current value and online state. |
+| `GET` | `/sensors/{id}/temperature` | Latest reading of one sensor. |
+| `GET` | `/sensors/{id}/history` | Stored values of one sensor for the last 24 h, oldest first. |
+| `POST` | `/sensors/{id}/measure` | Store that sensor's current reading in its history immediately, in addition to the per-minute sample. |
+| `GET` | `/temperature` | Like `/sensors/{id}/temperature` for the **default sensor** (see below). |
+| `GET` | `/history` | Like `/sensors/{id}/history` for the default sensor. |
+| `POST` | `/measure` | Like `/sensors/{id}/measure` for the default sensor. |
 | `GET` | `/health` | Liveness check, always `{"ok": true}` while the service runs. |
 | `GET` | `/docs` | Interactive API documentation (Swagger UI). |
 
-`GET /temperature`
+`{id}` is the sensor address from the serial output, e.g. `28FF641E8D3C0A12`. An unknown id returns **404**.
+
+The default sensor is the one with the lowest address among all sensors seen so far. The three endpoints without `/sensors/...` exist for single-sensor setups and older clients; with several sensors use the `/sensors/...` endpoints.
+
+`GET /sensors`
+
+```json
+[
+  {"id": "28AA000000000001", "name": null, "online": true,  "temperature_c": 18.0, "timestamp": "2026-01-01T12:00:01+00:00"},
+  {"id": "28B87D76E0013C86", "name": "Bedroom/Office", "online": false, "temperature_c": null, "timestamp": "2026-01-01T11:58:40+00:00"}
+]
+```
+
+`name` comes from `rest-api/config/sensor_names.json` (address → display name, see below). Sensors not listed there have `name: null` and show up as `Sensor …<last 4 digits>` on the chart page.
+
+An offline sensor (no reading for `MAX_AGE_S`) has `temperature_c: null`; `timestamp` is its last reading.
+
+`GET /sensors/{id}/temperature` and `GET /temperature`
 
 ```json
 {"temperature_c": 21.5, "timestamp": "2026-01-01T12:00:01+00:00"}
@@ -107,13 +131,26 @@ The service listens on port **8000**. Change the left side of `ports:` if it is 
 
 `POST /measure` returns the stored entry in the same format as one history item.
 
-Errors: `/temperature` and `/measure` return **503** with `{"detail": "..."}` if no reading has been received yet or the last one is older than `MAX_AGE_S`.
+Errors: the temperature and measure endpoints return **503** with `{"detail": "..."}` if no reading has been received yet or the last one of that sensor is older than `MAX_AGE_S`.
 
 History behavior:
 
-- One value is stored at every full minute, timestamped to that minute.
-- While the Arduino is disconnected nothing is stored, which leaves a gap. Old values are never repeated.
+- One value per sensor is stored at every full minute, timestamped to that minute.
+- While a sensor or the Arduino is disconnected nothing is stored for it, which leaves a gap. Old values are never repeated.
 - Entries older than 24 hours are permanently deleted.
+
+## Sensor names
+
+Names live in `rest-api/config/sensor_names.json`:
+
+```json
+{
+  "28B87D76E0013C86": "Bedroom/Office",
+  "28C19676E0013C22": "Living room"
+}
+```
+
+`docker-compose.yml` mounts the `config/` directory read-only into the container. The file is re-read on every `GET /sensors`, so after editing it **no restart or rebuild is needed**; reload the chart page. A missing or invalid file simply means no names. Find the address of a new sensor in the serial output or in `GET /sensors`.
 
 ## Use it from other software
 
